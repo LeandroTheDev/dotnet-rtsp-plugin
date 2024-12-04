@@ -6,7 +6,7 @@ namespace RTSPPlugin
     {
         private readonly string Arguments = string.Empty;
         private readonly string FfmpegPath = string.Empty;
-        private readonly string VideoPath = string.Empty;
+        private readonly string CameraAddress = string.Empty;
         private Process? FfmpegProcess = null;
 
         /// <summary>
@@ -34,14 +34,14 @@ namespace RTSPPlugin
         private readonly System.Timers.Timer timeoutTimer;
 
         public ImageStream(
-            string videoPath,
+            string cameraAddress,
             byte quality = 1,
             byte framerate = 1,
             string? ffmpegPath = null,
             string codec = "libx265",
             int timeout = 5000)
         {
-            VideoPath = videoPath;
+            CameraAddress = cameraAddress;
 
             if (ffmpegPath == null)
                 FfmpegPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ffmpeg", "bin", "ffmpeg.exe");
@@ -63,7 +63,7 @@ namespace RTSPPlugin
                 _ => throw new ArgumentException("Invalid quality number, use a number between 0 and 8"),
             };
 
-            Arguments = $"-i \"{VideoPath}\" -c:v {codec} -preset {preset} -r {framerate} -f image2pipe -vcodec png -";
+            Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -f image2pipe -vcodec png -";
 
             var startInfo = new ProcessStartInfo
             {
