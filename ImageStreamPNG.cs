@@ -2,7 +2,7 @@
 
 namespace RTSPPlugin
 {
-    public class ImageStream
+    public class ImageStreamPNG
     {
         private readonly string Arguments = string.Empty;
         private readonly string FfmpegPath = string.Empty;
@@ -31,9 +31,9 @@ namespace RTSPPlugin
         public Action<string>? OnStreamFail { get; set; }
 
         private int untilTimeout = 0;
-        private readonly System.Timers.Timer timeoutTimer;
+        private Timer? timeoutTimer;
 
-        public ImageStream(
+        public ImageStreamPNG(
             string cameraAddress,
             byte quality = 1,
             byte framerate = 1,
@@ -44,7 +44,8 @@ namespace RTSPPlugin
             CameraAddress = cameraAddress;
 
             if (ffmpegPath == null)
-                FfmpegPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ffmpeg", "bin", "ffmpeg.exe");
+                FfmpegPath = 
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ffmpeg", "bin", "ffmpeg.exe");
             else
                 FfmpegPath = ffmpegPath;
 
@@ -87,7 +88,8 @@ namespace RTSPPlugin
                 {
                     if (e.Data.StartsWith("Error opening input files: Server returned"))
                     {
-                        ErrorMessage = e.Data["Error opening input files: ".Length..];
+                        int startIndex = "Error opening input files: ".Length;
+                        ErrorMessage = e.Data.Substring(startIndex);
                         OnStreamFail?.Invoke(ErrorMessage);
                     }
                     Debug.WriteLine($"[ImageStream Error]: {e.Data}");
@@ -126,6 +128,7 @@ namespace RTSPPlugin
                     // Inside the PNG
                     else if (receivingImage.Count > 0)
                     {
+                        untilTimeout = 0;
                         receivingImage.Add(currentByteValue);
 
                         // Footer check
@@ -144,24 +147,24 @@ namespace RTSPPlugin
             });
 
             int increaser = 100;
-            timeoutTimer = new System.Timers.Timer()
+            timeoutTimer = new Timer((_) =>
             {
-                Interval = increaser,
-                AutoReset = true,
-            };
-            timeoutTimer.Elapsed += (sender, e) =>
-            {
-                if (!timeoutTimer.Enabled) return;
-
-                untilTimeout += increaser;
-                if (untilTimeout >= timeout)
+                try
                 {
-                    timeoutTimer.Stop();
-                    ErrorMessage = "Stream Timeout";
-                    OnStreamFail?.Invoke(ErrorMessage);
+                    untilTimeout += increaser;
+                    if (untilTimeout >= timeout)
+                    {
+                        timeoutTimer?.Dispose();
+                        timeoutTimer = null;
+                        ErrorMessage = "Stream Timeout";
+                        OnStreamFail?.Invoke(ErrorMessage);
+                    }
                 }
-            };
-            timeoutTimer.Start();
+                catch (Exception ex)
+                {
+                    Debug.WriteLine(ex.Message);
+                }
+            }, null, 0, 100);
 
             Debug.WriteLine($"[ImageStream]: Starting Ffmpeg Process");
         }
@@ -174,8 +177,8 @@ namespace RTSPPlugin
         {
             try
             {
-                timeoutTimer.Stop();
-                timeoutTimer.Dispose();
+                timeoutTimer?.Dispose();
+                timeoutTimer = null;
             }
             catch (Exception) { }
 
