@@ -3,9 +3,9 @@
 namespace RTSPPlugin
 {
     /// <summary>
-    /// Stores in directory a single stream
+    /// Saves a sequential video every cutTimerInSeconds that can be merged in future
     /// </summary>
-    public class VideoStream
+    public class SequentialStream
     {
         /// <summary>
         /// Stores all process running by ImageStreamJPEG
@@ -24,7 +24,7 @@ namespace RTSPPlugin
                     var process = Process.GetProcessById(processId);
                     if (process.ProcessName == "ffmpeg")
                     {
-                        Debug.WriteLine($"Video Stream has been killed with id: {processId}");
+                        Debug.WriteLine($"Sequential Stream has been killed with id: {processId}");
                         process.Kill();
                     };
                 }
@@ -36,8 +36,9 @@ namespace RTSPPlugin
         private readonly string Arguments = string.Empty;
         private readonly string FfmpegPath = string.Empty;
         private readonly string OutputPath = string.Empty;
-        private readonly string OutputDirectory = string.Empty;        
+        private readonly string TempPath = string.Empty;
         private Process? FfmpegProcess = null;
+        private bool ioProcessWorking = false;
 
         /// <summary>
         /// If any errors occurs will be stored in this variable
@@ -56,8 +57,9 @@ namespace RTSPPlugin
 
         private int untilTimeout = 0;
         private Timer? timeoutTimer;
+        private Timer? tempToOutputTimer;
 
-        public VideoStream(
+        public SequentialStream(
             string cameraAddress,
             string outputPath,
             byte compression = 5,
@@ -66,11 +68,13 @@ namespace RTSPPlugin
             string bitrate = "1M",
             string? ffmpegPath = null,
             string codec = "libx265",
-            string fileType = "matroska",
-            int cutTimerInSeconds = 0,
+            int cutTimerInSeconds = 60,
             int timeout = 10000,
             bool enableLogs = false)
         {
+            if (cutTimerInSeconds < 1)
+                throw new ArgumentException("cutTimerInSeconds needs to be bigger than 0");
+
             if (ffmpegPath == null)
                 FfmpegPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ffmpeg", "bin", "ffmpeg.exe");
             else
@@ -92,32 +96,29 @@ namespace RTSPPlugin
             };
 
             OutputPath = outputPath;
-            OutputDirectory = Path.GetDirectoryName(OutputPath) ??
-                throw new ArgumentException($"Cannot get the output directory from: {OutputPath}");
+            TempPath = Path.Combine(outputPath, "Temp");
 
-            if (!Directory.Exists(OutputDirectory))
-                Directory.CreateDirectory(OutputDirectory);
+            if (!Directory.Exists(OutputPath))
+                Directory.CreateDirectory(OutputPath);
 
-            if (cutTimerInSeconds > 0)
+            if (!Directory.Exists(TempPath))
+                Directory.CreateDirectory(TempPath);
+            else
             {
-                var fileName = Path.GetFileNameWithoutExtension(OutputPath);
-                var fileExtension = Path.GetExtension(OutputPath);
-                OutputPath = Path.Combine(OutputDirectory, fileName + $"-{DateTime.Now:yyyyMMdd-HHmmss}" + fileExtension);
+                Directory.Delete(TempPath, true);
+                Directory.CreateDirectory(TempPath);
             }
 
-            if (File.Exists(OutputPath))
-                File.Delete(OutputPath);
+            if (enableLogs)
+                Debug.WriteLine($"[SequentialStream] Starting...");
 
-            Debug.WriteLine($"[VideoStream] Starting...");
+            string ffmpegOutputPath = Path.Combine(TempPath, "output%09d.ts");
 
             CameraAddress = cameraAddress;
-            if (cutTimerInSeconds > 0)
-                Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -crf {quality} -b:v {bitrate} -f {fileType} -t {cutTimerInSeconds} \"{OutputPath}\"";
-            else
-                Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -crf {quality} -b:v {bitrate} -f {fileType} \"{OutputPath}\"";
+            Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -g 30 -preset {preset} -r {framerate} -crf {quality} -b:v {bitrate} -c:a aac -f segment -segment_time {cutTimerInSeconds} -reset_timestamps 1 -segment_format mpegts \"{ffmpegOutputPath}\"";
 
             if (enableLogs)
-                Debug.WriteLine($"[VideoStream] Address: {cameraAddress}\nArguments: {Arguments}");
+                Debug.WriteLine($"[SequentialStream] Address: {cameraAddress}\nArguments: {Arguments}");
 
             var startInfo = new ProcessStartInfo
             {
@@ -138,7 +139,7 @@ namespace RTSPPlugin
             FfmpegProcess.OutputDataReceived += (sender, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data) && enableLogs)
-                    Debug.WriteLine($"[FFmpeg Output] {e.Data}");
+                    Debug.WriteLine($"[FFmpeg Output]: {e.Data}");
             };
 
             FfmpegProcess.ErrorDataReceived += (sender, e) =>
@@ -153,7 +154,7 @@ namespace RTSPPlugin
                     untilTimeout = 0;
 
                     if (enableLogs)
-                        Debug.WriteLine($"[Ffmpeg Error] {e.Data}");
+                        Debug.WriteLine($"[Ffmpeg Error]: {e.Data}");
                 }
             };
 
@@ -188,9 +189,55 @@ namespace RTSPPlugin
                 }
             }, null, 0, 100);
 
+            tempToOutputTimer = new Timer((_) =>
+            {
+                if (!ioProcessWorking && Directory.Exists(TempPath))
+                {
+                    string[] files = Directory.GetFiles(TempPath);
+                    if (files.Length >= 2)
+                    {
+                        ioProcessWorking = true;
+
+                        // Finished video
+                        {
+                            var orderedFiles = files.OrderBy(File.GetCreationTime).ToArray();
+                            string penultimateFile = orderedFiles[files.Length - 2];
+                            string destinationPath = Path.Combine(outputPath, $"{DateTime.Now:yyyyMMdd-HHmm}.ts");
+
+                            File.Move(penultimateFile, destinationPath, true);
+                            if (enableLogs)
+                                Debug.WriteLine($"[SequentialStream] {penultimateFile} moved to {destinationPath}");
+                        }
+
+                        // Unused temporary files
+                        {
+                            string[] filesAfter = Directory.GetFiles(TempPath);
+                            if (filesAfter.Length >= 2)
+                            {
+                                var orderedFiles = files.OrderBy(File.GetCreationTime).ToArray();
+
+                                string lastFile = orderedFiles.Last();
+
+                                foreach (string file in orderedFiles)
+                                {
+                                    if (file != lastFile)
+                                    {
+                                        File.Delete(file);
+                                        if (enableLogs)
+                                            Debug.WriteLine($"[SequentialStream] Temporary deleted because no longer will be used {file}");
+                                    }
+                                }
+                            }
+                        }
+
+                        ioProcessWorking = false;
+                    }
+                }
+            }, null, 0, 1000);
+
             ActivesStreams.Add(FfmpegProcess.Id);
             if (enableLogs)
-                Debug.WriteLine($"[VideoStream] Starting Ffmpeg Process");
+                Debug.WriteLine($"[SequentialStream] Starting Ffmpeg Process");
         }
 
         /// <summary>
@@ -203,6 +250,13 @@ namespace RTSPPlugin
             {
                 timeoutTimer?.Dispose();
                 timeoutTimer = null;
+            }
+            catch (Exception) { }
+
+            try
+            {
+                tempToOutputTimer?.Dispose();
+                tempToOutputTimer = null;
             }
             catch (Exception) { }
 

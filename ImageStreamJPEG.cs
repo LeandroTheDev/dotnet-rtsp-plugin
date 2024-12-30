@@ -2,8 +2,36 @@
 
 namespace RTSPPlugin
 {
+    /// <summary>
+    /// Creates any instance that updates the LastFrameBytes with the last image received from the streaming
+    /// </summary>
     public class ImageStreamJPEG
     {
+        /// <summary>
+        /// Stores all process running by ImageStreamJPEG
+        /// </summary>
+        public static readonly List<int> ActivesStreams = [];
+
+        /// <summary>
+        /// Kill all process running in ActivesStreams
+        /// </summary>
+        public static void KillActivesStreams()
+        {
+            ActivesStreams.ForEach((processId) =>
+            {
+                try
+                {
+                    var process = Process.GetProcessById(processId);
+                    if (process.ProcessName == "ffmpeg")
+                    {
+                        Debug.WriteLine($"Image Stream has been killed with id: {processId}");
+                        process.Kill();
+                    };
+                }
+                catch (Exception) { }
+            });
+        }
+
         private readonly string Arguments = string.Empty;
         private readonly string FfmpegPath = string.Empty;
         private readonly string CameraAddress = string.Empty;
@@ -18,7 +46,6 @@ namespace RTSPPlugin
         /// Last image bytes from stream
         /// </summary>
         public List<byte> LastFrameBytes = [];
-        private List<byte> receivingImage = [];
 
         /// <summary>
         /// Called every time we receive a new image from the stream, returns the image bytes
@@ -35,11 +62,10 @@ namespace RTSPPlugin
 
         public ImageStreamJPEG(
             string cameraAddress,
-            byte quality = 1,
-            byte framerate = 1,
+            string bitrate = "1M",
             string? ffmpegPath = null,
-            string codec = "libx265",
-            int timeout = 5000)
+            int timeout = 10000,
+            bool enableLogs = false)
         {
             CameraAddress = cameraAddress;
 
@@ -49,22 +75,10 @@ namespace RTSPPlugin
             else
                 FfmpegPath = ffmpegPath;
 
-            string preset = string.Empty;
-            preset = quality switch
-            {
-                0 => "ultrafast",
-                1 => "superfast",
-                2 => "veryfast",
-                3 => "faster",
-                4 => "fast",
-                5 => "medium",
-                6 => "slow",
-                7 => "slower",
-                8 => "veryslow",
-                _ => throw new ArgumentException("Invalid quality number, use a number between 0 and 8"),
-            };
+            Arguments = $"-i \"{CameraAddress}\" -b:v {bitrate} -f image2pipe -vcodec mjpeg -";
 
-            Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -f image2pipe -vcodec mjpeg -";
+            if (enableLogs)
+                Debug.WriteLine($"[ImageStream] Address: {cameraAddress}\nArguments: {Arguments}");
 
             var startInfo = new ProcessStartInfo
             {
@@ -89,10 +103,11 @@ namespace RTSPPlugin
                     if (e.Data.StartsWith("Error opening input files: Server returned"))
                     {
                         int startIndex = "Error opening input files: ".Length;
-                        ErrorMessage = e.Data.Substring(startIndex);
+                        ErrorMessage = e.Data[startIndex..];
                         OnStreamFail?.Invoke(ErrorMessage);
                     }
-                    Debug.WriteLine($"[ImageStream Error]: {e.Data}");
+                    if (enableLogs)
+                        Debug.WriteLine($"[ImageStream Error]: {e.Data}");
                 }
             };
 
@@ -106,10 +121,10 @@ namespace RTSPPlugin
                     using var stream = FfmpegProcess.StandardOutput.BaseStream;
                     int currentByte;
                     Queue<byte> headerBuffer = new();
-                    List<byte> receivingImage = new();
+                    List<byte> receivingImage = [];
 
-                    byte[] jpegHeader = { 0xFF, 0xD8 };
-                    byte[] jpegFooter = { 0xFF, 0xD9 };
+                    byte[] jpegHeader = [0xFF, 0xD8];
+                    byte[] jpegFooter = [0xFF, 0xD9];
 
                     while ((currentByte = stream.ReadByte()) != -1)
                     {
@@ -122,7 +137,8 @@ namespace RTSPPlugin
                         if (headerBuffer.SequenceEqual(jpegHeader))
                         {
                             untilTimeout = 0;
-                            Debug.WriteLine("[ImageStream] JPEG Header Detected!");
+                            if (enableLogs)
+                                Debug.WriteLine("[ImageStream] JPEG Header Detected!");
                             receivingImage = new List<byte>(jpegHeader);
                         }
                         else if (receivingImage.Count > 0)
@@ -133,7 +149,8 @@ namespace RTSPPlugin
                             if (receivingImage.Count >= jpegFooter.Length &&
                                 receivingImage.Skip(receivingImage.Count - jpegFooter.Length).Take(jpegFooter.Length).SequenceEqual(jpegFooter))
                             {
-                                Debug.WriteLine($"[ImageStream] JPEG Frame Complete! Size: {receivingImage.Count} bytes");
+                                if (enableLogs)
+                                    Debug.WriteLine($"[ImageStream] JPEG Frame Complete! Size: {receivingImage.Count} bytes");
 
                                 LastFrameBytes = receivingImage;
                                 OnImageUpdate?.Invoke(LastFrameBytes);
@@ -169,11 +186,13 @@ namespace RTSPPlugin
                 }
             }, null, 0, 100);
 
-            Debug.WriteLine($"[ImageStream]: Starting Ffmpeg Process");
+            ActivesStreams.Add(FfmpegProcess.Id);
+            if (enableLogs)
+                Debug.WriteLine($"[ImageStream]: Starting Ffmpeg Process");
         }
 
         /// <summary>
-        /// Stops all the stream process and clean the memory
+        /// Stops the stream process and clean the memory
         /// </summary>
         /// <returns></returns>
         public Task Dispose()
@@ -196,6 +215,7 @@ namespace RTSPPlugin
             try
             {
                 // Memory cleanup
+                ActivesStreams.Remove((int)processId!);
                 FfmpegProcess?.Close();
                 FfmpegProcess?.Dispose();
             }
@@ -218,6 +238,7 @@ namespace RTSPPlugin
 
                         if (actualTries >= maxTries)
                         {
+                            ActivesStreams.Remove((int)processId!);
                             processExistance.Kill();
                             return;
                         };

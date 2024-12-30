@@ -2,8 +2,6 @@
 Download or visualize streams using rtsp protocol with [ffmpeg](https://www.ffmpeg.org/) software
 
 ### Using
-The project comes with a windows forms template, you can debug it in Demonstration folder
-
 Stream Address Example: ``rtsp://admin:password@127.0.0.1``
 
 You need the [ffmpeg binary](https://www.ffmpeg.org/download.html), you can also choose the specific location to load the ffmpeg in the stream constructor, more examples below

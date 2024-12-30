@@ -3,28 +3,28 @@
 namespace RTSPPlugin
 {
     /// <summary>
-    /// Stores in directory a single stream
+    /// Merge all selected video path into one single video, the videos needs to be in the 
     /// </summary>
-    public class VideoStream
+    public class VideoMerge
     {
         /// <summary>
-        /// Stores all process running by ImageStreamJPEG
+        /// Stores all process running by VideoMerger
         /// </summary>
-        public static readonly List<int> ActivesStreams = [];
+        public static readonly List<int> ActivesMergers = [];
 
         /// <summary>
-        /// Kill all process running in ActivesStreams
+        /// Kill all process running in ActivesMergers
         /// </summary>
-        public static void KillActivesStreams()
+        public static void KillActivesMergers()
         {
-            ActivesStreams.ForEach((processId) =>
+            ActivesMergers.ForEach((processId) =>
             {
                 try
                 {
                     var process = Process.GetProcessById(processId);
                     if (process.ProcessName == "ffmpeg")
                     {
-                        Debug.WriteLine($"Video Stream has been killed with id: {processId}");
+                        Debug.WriteLine($"Video Converter has been killed with id: {processId}");
                         process.Kill();
                     };
                 }
@@ -32,11 +32,10 @@ namespace RTSPPlugin
             });
         }
 
-        private readonly string CameraAddress = string.Empty;
         private readonly string Arguments = string.Empty;
         private readonly string FfmpegPath = string.Empty;
         private readonly string OutputPath = string.Empty;
-        private readonly string OutputDirectory = string.Empty;        
+        private readonly string OutputDirectory = string.Empty;
         private Process? FfmpegProcess = null;
 
         /// <summary>
@@ -47,49 +46,24 @@ namespace RTSPPlugin
         /// <summary>
         /// Returns the error message
         /// </summary>
-        public Action<string>? OnStreamFail { get; set; }
+        public Action<string>? OnMergeFail { get; set; }
 
         /// <summary>
         /// Returns the output path from the stream, only invoked when the stream ends with the code 0
         /// </summary>
-        public Action<string>? OnStreamEnd { get; set; }
+        public Action<string>? OnMergeEnd { get; set; }
 
-        private int untilTimeout = 0;
-        private Timer? timeoutTimer;
-
-        public VideoStream(
-            string cameraAddress,
+        public VideoMerge(
             string outputPath,
-            byte compression = 5,
-            byte quality = 23,
-            byte framerate = 30,
-            string bitrate = "1M",
+            string[] files,
             string? ffmpegPath = null,
-            string codec = "libx265",
-            string fileType = "matroska",
-            int cutTimerInSeconds = 0,
-            int timeout = 10000,
-            bool enableLogs = false)
+            string resolution = "1920:1080",
+            bool enableDebug = false)
         {
             if (ffmpegPath == null)
                 FfmpegPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ffmpeg", "bin", "ffmpeg.exe");
             else
                 FfmpegPath = ffmpegPath;
-
-            string preset = string.Empty;
-            preset = compression switch
-            {
-                0 => "ultrafast",
-                1 => "superfast",
-                2 => "veryfast",
-                3 => "faster",
-                4 => "fast",
-                5 => "medium",
-                6 => "slow",
-                7 => "slower",
-                8 => "veryslow",
-                _ => throw new ArgumentException("Invalid quality number, use a number between 0 and 8"),
-            };
 
             OutputPath = outputPath;
             OutputDirectory = Path.GetDirectoryName(OutputPath) ??
@@ -98,26 +72,17 @@ namespace RTSPPlugin
             if (!Directory.Exists(OutputDirectory))
                 Directory.CreateDirectory(OutputDirectory);
 
-            if (cutTimerInSeconds > 0)
-            {
-                var fileName = Path.GetFileNameWithoutExtension(OutputPath);
-                var fileExtension = Path.GetExtension(OutputPath);
-                OutputPath = Path.Combine(OutputDirectory, fileName + $"-{DateTime.Now:yyyyMMdd-HHmmss}" + fileExtension);
-            }
-
             if (File.Exists(OutputPath))
                 File.Delete(OutputPath);
 
-            Debug.WriteLine($"[VideoStream] Starting...");
+            if (enableDebug)
+                Console.WriteLine($"[VideoMerge] Starting...");
 
-            CameraAddress = cameraAddress;
-            if (cutTimerInSeconds > 0)
-                Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -crf {quality} -b:v {bitrate} -f {fileType} -t {cutTimerInSeconds} \"{OutputPath}\"";
-            else
-                Arguments = $"-i \"{CameraAddress}\" -c:v {codec} -preset {preset} -r {framerate} -crf {quality} -b:v {bitrate} -f {fileType} \"{OutputPath}\"";
+            string concatFiles = string.Join("|", files.Select(file => file.Replace(@"\", "/")));
+            Arguments = $"-i \"concat:{concatFiles}\" -vf scale={resolution} \"{outputPath}\"";
 
-            if (enableLogs)
-                Debug.WriteLine($"[VideoStream] Address: {cameraAddress}\nArguments: {Arguments}");
+            if (enableDebug)
+                Console.WriteLine($"[VideoMerge Arguments] {Arguments}");
 
             var startInfo = new ProcessStartInfo
             {
@@ -137,23 +102,20 @@ namespace RTSPPlugin
 
             FfmpegProcess.OutputDataReceived += (sender, e) =>
             {
-                if (!string.IsNullOrEmpty(e.Data) && enableLogs)
-                    Debug.WriteLine($"[FFmpeg Output] {e.Data}");
+                if (!string.IsNullOrEmpty(e.Data))
+                {
+                    if (enableDebug)
+                        Console.WriteLine($"[VideoMerge Output] {e.Data}");
+                }
+
             };
 
             FfmpegProcess.ErrorDataReceived += (sender, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
                 {
-                    if (e.Data.StartsWith("Error opening input files: Server returned"))
-                    {
-                        ErrorMessage = e.Data["Error opening input files: ".Length..];
-                        OnStreamFail?.Invoke(ErrorMessage);
-                    }
-                    untilTimeout = 0;
-
-                    if (enableLogs)
-                        Debug.WriteLine($"[Ffmpeg Error] {e.Data}");
+                    if (enableDebug)
+                        Console.WriteLine($"[VideoMerge Error] {e.Data}");
                 }
             };
 
@@ -161,36 +123,16 @@ namespace RTSPPlugin
             FfmpegProcess.Exited += (sender, e) =>
             {
                 if (FfmpegProcess?.ExitCode == 0)
-                    OnStreamEnd?.Invoke(OutputPath);
+                    OnMergeEnd?.Invoke(OutputPath);
             };
 
             FfmpegProcess.Start();
             FfmpegProcess.BeginOutputReadLine();
             FfmpegProcess.BeginErrorReadLine();
 
-            int increaser = 100;
-            timeoutTimer = new Timer((_) =>
-            {
-                try
-                {
-                    untilTimeout += increaser;
-                    if (untilTimeout >= timeout)
-                    {
-                        timeoutTimer?.Dispose();
-                        timeoutTimer = null;
-                        ErrorMessage = "Stream Timeout";
-                        OnStreamFail?.Invoke(ErrorMessage);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine(ex.Message);
-                }
-            }, null, 0, 100);
-
-            ActivesStreams.Add(FfmpegProcess.Id);
-            if (enableLogs)
-                Debug.WriteLine($"[VideoStream] Starting Ffmpeg Process");
+            ActivesMergers.Add(FfmpegProcess.Id);
+            if (enableDebug)
+                Console.WriteLine($"[VideoMerge] Starting Ffmpeg Process");
         }
 
         /// <summary>
@@ -199,13 +141,6 @@ namespace RTSPPlugin
         /// <returns></returns>
         public Task Dispose()
         {
-            try
-            {
-                timeoutTimer?.Dispose();
-                timeoutTimer = null;
-            }
-            catch (Exception) { }
-
             int? processId = FfmpegProcess?.Id;
             try
             {
@@ -217,7 +152,7 @@ namespace RTSPPlugin
             try
             {
                 // Memory cleanup
-                ActivesStreams.Remove((int)processId!);
+                ActivesMergers.Remove((int)processId!);
                 FfmpegProcess?.Close();
                 FfmpegProcess?.Dispose();
             }
@@ -240,7 +175,7 @@ namespace RTSPPlugin
 
                         if (actualTries >= maxTries)
                         {
-                            ActivesStreams.Remove((int)processId!);
+                            ActivesMergers.Remove((int)processId!);
                             processExistance.Kill();
                             return;
                         };
